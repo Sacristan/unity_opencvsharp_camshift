@@ -6,7 +6,7 @@
 // Tony Reina
 // Created: 30 October 2014
 //
-// $Id: VideoCaptureScript.cs 41 2014-12-18 03:23:44Z tbreina $
+// $Id: VideoCaptureScript.cs 44 2014-12-25 07:00:15Z tbreina $
 //
 // This file may be used under the terms of the 2-clause BSD license:
 //
@@ -35,17 +35,16 @@
 using UnityEngine;
 using System.Collections;
 using System.Collections.Generic;
-using OpenCvSharp;   // OpenCVSharp 2.4.8
+using OpenCvSharp;   // OpenCVSharp 2.4.9
 
-
-// Parallel is used to speed up the for loop when converting IplImage to 2D texture
+// Parallel is used to speed up the for loop when converting CvMat to 2D texture
 using Uk.Org.Adcock.Parallel;  // Stewart Adcock's implementation of parallel processing 
 
 
 public class VideoCaptureScript : MonoBehaviour
 {
 
-		public GameObject marker; // External game object which can track the ROI
+		public GameObject gameObjectTracker; // External game object which can track the ROI
 
 		// Flip the video source axes (webcams are usually mirrored)
 		// Unity and OpenCV images are flipped
@@ -53,6 +52,9 @@ public class VideoCaptureScript : MonoBehaviour
 
 		// Displays the region of interest chosen by mouse 
 		public bool DisplayROIFlag = true;
+
+		// Displays a thresholding image
+		public bool DrawThresholdImageFlag = false;
 
 		// Object parameters - rectangle where the attached gameObject is in screen coordinates
 		Rect objectScreenPosition = new Rect (0, 0, 1, 1);
@@ -64,13 +66,10 @@ public class VideoCaptureScript : MonoBehaviour
 		private int imWidth;  // Input devices image width
 		private int imHeight;  // Input devices image height 
 		private int imColorChannels = 3; // Number of color channels (red, blue, green (or HSV))
-		private BitDepth imBitDepth = BitDepth.U8; // Unsigned 8-bit value for color channels
-
-		// Image from the webcam (or video source)
-		// If you don't declare this as "static", then you'll get the runtime error:
-		// The same field name is serialized multiple times in the class or it's parent class. 
-		// This is not supported:  -> Base(VideoCaptureScript) inputImage(IplImage) disposed
-		static IplImage videoSourceImage;                 //Ipl image of the converted video texture
+		private MatrixType MonoColorMatrix = MatrixType.U8C1;  // Unsigned 8-bit one channel color (0-255)
+		private MatrixType TriColorMatrix = MatrixType.U8C3; // Unsigned 8-bit three channel color (0-255)
+		
+		CvMat videoSourceImage;  // Image from the video source (webcam)
 
 		// Select region of interest (ROI)
 		//////////////////////////////////
@@ -138,30 +137,15 @@ public class VideoCaptureScript : MonoBehaviour
 						imWidth = _webcamTexture.width;
 						imHeight = _webcamTexture.height;
 						
-						// Create standard IplImage based on web camera video input
+						// Create standard CvMat image based on web camera video input
 						// 3 channels for color images with unsigned 8-bit depth of color values
-						videoSourceImage = new IplImage (imWidth, imHeight, imBitDepth, imColorChannels);
+						videoSourceImage = new CvMat (imHeight, imWidth, TriColorMatrix);
 
-						CreateOutputWindows (); // Create the openCV windows if desired;
+						if (DrawThresholdImageFlag)
+								DrawThresholdSliderBars ();
 
 				}
 		
-		}
-
-		// Create some output windows to show the intermediate OpenCV steps
-		// e.g. Thresholding, BackProjections, Histograms
-		void CreateOutputWindows ()
-		{
-
-				// OpenCV windows only needed to be explicitly created here at 
-				// startup if we are mofying the window in some way. For example,
-				// we add HSV range slider bars to the thresholding window.
-//				Cv.NamedWindow ("HSV Thresholded Image");
-//				Cv.CreateTrackbar ("Hue Low", "HSV Thresholded Image", _hueLow, 179, onTrackbarHueLow);
-//				Cv.CreateTrackbar ("Hue High", "HSV Thresholded Image", _hueHigh, 179, onTrackbarHueHigh);
-//				Cv.CreateTrackbar ("Sat Low", "HSV Thresholded Image", _satLow, 255, onTrackbarSatLow);
-//				Cv.CreateTrackbar ("Sat High", "HSV Thresholded Image", _satHigh, 255, onTrackbarSatHigh);
-
 		}
 
 
@@ -212,13 +196,16 @@ public class VideoCaptureScript : MonoBehaviour
 		void Update ()
 		{
 
+				if (DrawThresholdImageFlag)
+						DrawThresholdImage (videoSourceImage); 
+
 				FindObjectScreenPosition ();
 				
 				if (_webcamTexture.isPlaying) {
 			
 						if (_webcamTexture.didUpdateThisFrame) {
-								//convert Unity 2D texture from webcam to IplImage
-								Texture2DToIplImage ();
+								//convert Unity 2D texture from webcam to CvMat
+								Texture2DToCvMat ();
 
 								// Do some image processing with OpenCVSharp on this image frame
 								ProcessImage (videoSourceImage);
@@ -239,8 +226,8 @@ public class VideoCaptureScript : MonoBehaviour
 								trackWindowFlag = !trackWindowFlag;
 
 						// Move an external game object based on the ROI being tracked
-						if (marker)
-								ROIScreenToGameObject (rotatedBoxToTrack, marker);
+						if (gameObjectTracker)
+								ROIScreenToGameObject (rotatedBoxToTrack, gameObjectTracker);
 
 				}
 		    
@@ -282,8 +269,6 @@ public class VideoCaptureScript : MonoBehaviour
 								lastPosition = new CvPoint (Mathf.FloorToInt (_rectToTrack.X), Mathf.FloorToInt (_rectToTrack.Y));
 								InitializeKalmanFilter ();
 
-								
-
 								trackFlag = true;
 						}
 			
@@ -293,36 +278,9 @@ public class VideoCaptureScript : MonoBehaviour
 		
 		}
 
-		void ProcessImage (IplImage _image)
+		void ProcessImage (CvMat _image)
 		{
 
-				// IplImage structure
-				//		typedef struct _IplImage {
-				//			int                  nSize;
-				//			int                  ID;
-				//			int                  nChannels;
-				//			int                  alphaChannel;
-				//			int                  depth;
-				//			char                 colorModel[4];
-				//			char                 channelSeq[4];
-				//			int                  dataOrder;
-				//			int                  origin;
-				//			int                  align;
-				//			int                  width;
-				//			int                  height;
-				//			struct _IplROI*      roi;
-				//			struct _IplImage*    maskROI;
-				//			void*                imageId;
-				//			struct _IplTileInfo* tileInfo;
-				//			int                  imageSize;
-				//			char*                imageData;
-				//			int                  widthStep;
-				//			int                  BorderMode[4];
-				//			int                  BorderConst[4];
-				//			char*                imageDataOrigin;
-				//		} IplImage;
-
-				// TODO: I think it's preferred to use CvMat rather than IplImage
 				if (trackFlag) {
 						
 						CalculateCamShift (_image);
@@ -350,7 +308,7 @@ public class VideoCaptureScript : MonoBehaviour
 
 				// Create an image to visualize the histogram
 				int scaleHeight = 5, scaleWidth = 5;
-				IplImage hist_img = new IplImage (Cv.Size (xBins * scaleWidth, yBins * scaleHeight), imBitDepth, imColorChannels);
+				CvMat hist_img = new CvMat (yBins * scaleHeight, xBins * scaleWidth, TriColorMatrix);
 				hist_img.Zero (); // Set all the pixels to black 
 
 				double binVal;
@@ -372,13 +330,11 @@ public class VideoCaptureScript : MonoBehaviour
 
 		
 				Cv.ShowImage ("HS Histogram", hist_img);
-
-				Cv.ReleaseImage (hist_img);
 		
 		}
 
 		// Creates an image from a 1D Histogram
-		void Draw1DHistogram (IplImage _image)
+		void Draw1DHistogram (CvMat _image)
 		{
 
 				float channelMax = 255;
@@ -398,8 +354,7 @@ public class VideoCaptureScript : MonoBehaviour
 				// Create an image to visualize the histogram
 				int scaleWidth = 3, scaleHeight = 1;
 				int histWidth = hBins * imColorChannels * scaleWidth, histHeight = Mathf.FloorToInt (channelMax * scaleHeight);
-				IplImage hist_img = new IplImage (Cv.Size (histWidth, histHeight), 
-		                                  imBitDepth, imColorChannels);
+				CvMat hist_img = new CvMat (histHeight, histWidth, TriColorMatrix);
 				hist_img.Zero (); // Set all the pixels to black 
 		
 				double binVal;
@@ -440,8 +395,6 @@ public class VideoCaptureScript : MonoBehaviour
 				}
 		
 				Cv.ShowImage ("Histogram", hist_img);
-
-				Cv.ReleaseImage (hist_img);
 		
 		}
 
@@ -450,7 +403,7 @@ public class VideoCaptureScript : MonoBehaviour
 		// Color images have 3 channels (4 if you count alpha?)
 		// Webcam captures them in (R)ed, (G)reen, (B)lue.
 		// Convert to (H)ue, (S)aturation (V)alue to get better separation for thresholding
-		CvHistogram CalculateHSVHistogram (IplImage _image)
+		CvHistogram CalculateHSVHistogram (CvMat _image)
 		{
 
 				// Hue, Saturation, Value or HSV is a color model that describes colors (hue or tint) 
@@ -480,25 +433,24 @@ public class VideoCaptureScript : MonoBehaviour
 
 				// Number of bins per histogram channel
 				// If we use all 3 channels (H, S, V) then the histogram will have 3 dimensions.
-				int[] hist_size = new int[]{hueBins}; //, satBins}; //, valueBins};
+				int[] hist_size = new int[]{hueBins, satBins, valueBins};
 
 				CvHistogram hist = new CvHistogram (hist_size, HistogramFormat.Array, ranges, true);
 
-				using (IplImage _imageHSV = ConvertToHSV (_image)) // Convert the image to HSV
-				// We could keep the image in R, G, B, A if we wanted to.
-				// Just split the channels into R, G, B planes
+				using (CvMat _imageHSV = ConvertToHSV (_image)) // Convert the image to HSV
+				// We could keep the image in B, G, R, A if we wanted to.
+				// Just split the channels into B, G, R planes
 
+				using (CvMat imgH = new CvMat(_image.Rows, _image.Cols, MonoColorMatrix))
+				using (CvMat imgS = new CvMat(_image.Rows, _image.Cols, MonoColorMatrix))
+				using (CvMat imgV = new CvMat(_image.Rows, _image.Cols, MonoColorMatrix)) {
 
-				using (IplImage imgH = new IplImage (_imageHSV.Size, imBitDepth, 1))
-				using (IplImage imgS = new IplImage (_imageHSV.Size, imBitDepth, 1))
-				using (IplImage imgV = new IplImage (_imageHSV.Size, imBitDepth, 1)) {
-			
 						// Break image into H, S, V planes
 						// If the image were RGB, then it would split into R, G, B planes respectively
 						_imageHSV.CvtPixToPlane (imgH, imgS, imgV, null);  // Cv.Split also does this
 
 						// Store HSV planes as an IplImage array to pass to openCV's hist function
-						IplImage[] hsvPlanes = { imgH }; //, imgS}; //, imgV };
+						IplImage[] hsvPlanes = { Cv.GetImage (imgH), Cv.GetImage (imgS), Cv.GetImage (imgV) };
 
 						hist.Calc (hsvPlanes, false, null);  // Call hist function (no accumulatation, no mask)
 
@@ -506,7 +458,6 @@ public class VideoCaptureScript : MonoBehaviour
 						hist.GetMinMaxValue (out minValue, out maxValue);
 						// Scale the histogram to unity height
 						hist.Normalize (_imageHSV.Width * _imageHSV.Height * hist.Dim * hueMax / maxValue);
-		
 
 				}
 
@@ -519,7 +470,7 @@ public class VideoCaptureScript : MonoBehaviour
 		// Color images have 3 channels (4 if you count alpha?)
 		// Webcam captures them in (R)ed, (G)reen, (B)lue.
 		// Convert to (H)ue, (S)aturation (V)alue to get better separation for thresholding
-		CvHistogram CalculateOneChannelHistogram (IplImage _image, int channelNum, float channelMax)
+		CvHistogram CalculateOneChannelHistogram (CvMat _image, int channelNum, float channelMax)
 		{
 		
 				// Hue, Saturation, Value or HSV is a color model that describes colors (hue or tint) 
@@ -536,7 +487,7 @@ public class VideoCaptureScript : MonoBehaviour
 				float[][] ranges = {channelRanges};
 		
 				// Note: You don't need to use all 3 channels for the histogram. 
-				int channelBins = 80;  // Number of bins in the Hue histogram (more bins = narrower bins)
+				int channelBins = 32;  // Number of bins in the Hue histogram (more bins = narrower bins)
 				
 				// Number of bins per histogram channel
 				// If we use all 3 channels (H, S, V) then the histogram will have 3 dimensions.
@@ -544,14 +495,14 @@ public class VideoCaptureScript : MonoBehaviour
 		
 				CvHistogram hist = new CvHistogram (hist_size, HistogramFormat.Array, ranges, true);
 		
-				using (IplImage _imageHSV = ConvertToHSV (_image)) // Convert the image to HSV
-			// We could keep the image in R, G, B, A if we wanted to.
-			// Just split the channels into R, G, B planes
-			
-				using (IplImage imgChannel = new IplImage (_imageHSV.Size, imBitDepth, 1)) {
+				using (CvMat _imageHSV = ConvertToHSV (_image)) // Convert the image to HSV
+			// We could keep the image in B, G, R, A if we wanted to.
+			// Just split the channels into B, G, R planes
+
+				using (CvMat imgChannel = new CvMat (_imageHSV.Rows, _imageHSV.Cols, MonoColorMatrix)) {
 			
 						// Break image into H, S, V planes
-						// If the image were RGB, then it would split into R, G, B planes respectively
+						// If the image were BGR, then it would split into B, G, R planes respectively
 
 						switch (channelNum) {
 						case 0:
@@ -568,10 +519,8 @@ public class VideoCaptureScript : MonoBehaviour
 								_imageHSV.CvtPixToPlane (imgChannel, null, null, null);  // Cv.Split also does this
 								break;
 						}
-						// Store HSV planes as an IplImage array to pass to openCV's hist function
-						IplImage[] hsvPlanes = { imgChannel };
-			
-						hist.Calc (hsvPlanes, false, null);  // Call hist function (no accumulatation, no mask)
+						
+						hist.Calc (Cv.GetImage (imgChannel), false, null);  // Call hist function (no accumulatation, no mask)
 			
 				}
 		
@@ -580,29 +529,32 @@ public class VideoCaptureScript : MonoBehaviour
 		}
 
 		// Call the Back Projection method and display the results in a window
-		void DrawBackProjection (IplImage _image)
+		void DrawBackProjection (CvMat _image)
 		{
 				if (trackFlag) 
 						Cv.ShowImage ("Back Projection", CalculateBackProjection (_image, _histogramToTrack));
-		
+
 		}
 
-		IplImage CalculateBackProjection (IplImage _image, CvHistogram hist)
+		CvMat CalculateBackProjection (CvMat _image, CvHistogram hist)
 		{
 
-				IplImage _backProject = new IplImage (_image.Size, imBitDepth, 1);
+				CvMat _backProject = new CvMat (_image.Rows, _image.Cols, MonoColorMatrix);
 
-				using (IplImage _imageHSV = ConvertToHSV (_image)) // Convert the image to HSV
-				using (IplImage imgH = new IplImage (_imageHSV.Size, imBitDepth, 1))
-				using (IplImage imgS = new IplImage (_imageHSV.Size, imBitDepth, 1))
-				using (IplImage imgV = new IplImage (_imageHSV.Size, imBitDepth, 1)) {
-				
+				using (CvMat _imageHSV = ConvertToHSV (_image)) // Convert the image to HSV
+				using (CvMat imgH = new CvMat(_image.Rows, _image.Cols, MonoColorMatrix))
+				using (CvMat imgS = new CvMat(_image.Rows, _image.Cols, MonoColorMatrix))
+				using (CvMat imgV = new CvMat(_image.Rows, _image.Cols, MonoColorMatrix)) {
+
 						// Break image into H, S, V planes
-						// If the image were RGB, then it would split into R, G, B planes respectively
+						// If the image were BGR, then it would split into B, G, R planes respectively
 						_imageHSV.CvtPixToPlane (imgH, imgS, imgV, null);  // Cv.Split also does this
 
 						// Store HSV planes as an IplImage array to pass to openCV's hist function
-						IplImage[] hsvPlanes = { imgH}; //, imgS}; //, imgV};
+
+						// TODO:  Why can't BackProjection accept CvMat?
+						IplImage[] hsvPlanes = { Cv.GetImage (imgH), Cv.GetImage (imgS), 
+				Cv.GetImage (imgV)};
 
 						hist.CalcBackProject (hsvPlanes, _backProject);
 
@@ -675,11 +627,10 @@ public class VideoCaptureScript : MonoBehaviour
 		}
 
 
-		void DrawROIBox (IplImage _image)
+		void DrawROIBox (CvMat _image)
 		{
 
 				_image.DrawRect (_rectToTrack, CvColor.Snow);
-
 				Cv.ShowImage ("ROI", _image);
 
 		}
@@ -687,10 +638,10 @@ public class VideoCaptureScript : MonoBehaviour
 
 		//  Use the CamShift algorithm to track to base histogram throughout the 
 		// succeeding frames
-		void CalculateCamShift (IplImage _image)
+		void CalculateCamShift (CvMat _image)
 		{
 
-				IplImage _backProject = CalculateBackProjection (_image, _histogramToTrack);
+				CvMat _backProject = CalculateBackProjection (_image, _histogramToTrack);
 				
 				// Create convolution kernel for erosion and dilation
 				IplConvKernel elementErode = Cv.CreateStructuringElementEx (10, 10, 5, 5, ElementShape.Rect, null);
@@ -777,8 +728,6 @@ public class VideoCaptureScript : MonoBehaviour
 				if (trackWindowFlag)
 						Cv.ShowImage ("Image", _image);
 
-				Cv.ReleaseImage (_backProject);
-
 
 		}
 
@@ -839,23 +788,25 @@ public class VideoCaptureScript : MonoBehaviour
 		// Return a region of interest (_rect_roi) from within the image _image
 		//  This doesn't need to be its own function, but I had so much trouble
 		//  finding a method that didn't crash the program that I separated it.
-		IplImage GetROI (IplImage _image, CvRect rect_roi)
+		CvMat GetROI (CvMat _image, CvRect rect_roi)
 		{
 				// Get the region of interest
 				CvMat img_roi;  // Get the region of interest
 
 				// Grab the region of interest using the mouse-drawn box
 				_image.GetSubRect (out img_roi, rect_roi);
+	
+				return (img_roi);
 
-				//Debug.Log (img_roi.GetSize ());
-				
-				return (Cv.GetImage (img_roi));  // Convert CvMat to IplImage
 		}
 
-		// Convert the Texture2D type of Unity to OpenCV's IplImage
+		// Convert the Texture2D type of Unity to OpenCV's CvMat
 		// This uses Adcock's parallel C# code to parallelize the conversion and make it faster
-		void Texture2DToIplImage ()
+		// I found the code execution dropped from 180 msec per frame to 70 msec per frame with parallelization
+		void Texture2DToCvMat ()
 		{
+
+				//float startTime = Time.realtimeSinceStartup;
 
 				Color[] pixels = _webcamTexture.GetPixels ();
 
@@ -876,19 +827,25 @@ public class VideoCaptureScript : MonoBehaviour
 						}
 				});
 
-				
-				// Non-parallelized code
-//				for (var i = 0; i < imHeight; i++) {
-//						for (var j = 0; j < imWidth; j++) {
-//								var pixel = pixels [j + i * imWidth];
-//								var col = new CvScalar
+
+
+//				CvScalar col;
+//				Color pixel;
+//				int i, j;
+//
+//				// Non-parallelized code
+//				for (i = 0; i < imHeight; i++) {
+//						for (j = 0; j < imWidth; j++) {
+//								pixel = pixels [j + i * imWidth];
+//						
+//								col = new CvScalar
 //								{
 //									Val0 = (double)pixel.b * 255,
 //									Val1 = (double)pixel.g * 255,
 //									Val2 = (double)pixel.r * 255
 //								};
 //				
-//								webcamera.Set2D (i, j, col);
+//								videoSourceImage.Set2D (i, j, col);
 //						}
 //
 //				}
@@ -900,12 +857,28 @@ public class VideoCaptureScript : MonoBehaviour
 						Cv.Flip (videoSourceImage, videoSourceImage, FlipMode.X);
 				else if (FlipLeftRightAxis)
 						Cv.Flip (videoSourceImage, videoSourceImage, FlipMode.Y);
-				         
+				      
+				// Test difference in time between parallel and non-parallel code
+				//Debug.Log (Time.realtimeSinceStartup - startTime);
+
+		}
+
+
+		// Draws the slider bars (trackbars) to adjust the H,S,V values
+		void DrawThresholdSliderBars ()
+		{
+
+				Cv.NamedWindow ("HSV Thresholded Image");
+				Cv.CreateTrackbar ("Hue Low", "HSV Thresholded Image", _hueLow, 179, onTrackbarHueLow);
+				Cv.CreateTrackbar ("Hue High", "HSV Thresholded Image", _hueHigh, 179, onTrackbarHueHigh);
+				Cv.CreateTrackbar ("Sat Low", "HSV Thresholded Image", _satLow, 255, onTrackbarSatLow);
+				Cv.CreateTrackbar ("Sat High", "HSV Thresholded Image", _satHigh, 255, onTrackbarSatHigh);
+
 		}
 
 
 		// Draw Thesholded Image
-		void DrawThresholdImage (IplImage _img)
+		void DrawThresholdImage (CvMat _img)
 		{
 
 
@@ -917,14 +890,15 @@ public class VideoCaptureScript : MonoBehaviour
 				// Hue range is [0,179], Saturation range is [0,255] and Value range is [0,255]
 				// CvScalar(H, S, V)
 
-				CvScalar _cvScalarFrom = new CvScalar (_hueLow, _satLow, 0), _cvScalarTo = new CvScalar (_hueHigh, _satHigh, 255);
+				CvScalar _cvScalarFrom = new CvScalar (_hueLow, _satLow, 0), 
+				_cvScalarTo = new CvScalar (_hueHigh, _satHigh, 255);
 				Cv.ShowImage ("HSV Thresholded Image", GetThresholdedImage (_img, _cvScalarFrom, _cvScalarTo));
 
 		}
 
 		// Threshold the image based on the HSV value
 		//  From and To are CvScalars of 3 values {Hue, Saturation, and (Brightness) Value)
-		IplImage GetThresholdedImage (IplImage img, CvScalar from, CvScalar to)
+		CvMat GetThresholdedImage (CvMat img, CvScalar from, CvScalar to)
 		{
 
 				// Hue, Saturation, Value or HSV is a color model that describes colors (hue or tint) 
@@ -938,20 +912,26 @@ public class VideoCaptureScript : MonoBehaviour
 				// Value (or Brightness) works in conjunction with saturation and 
 				// describes the brightness or intensity of the color from 0% to 100%.
 
-				IplImage imgHsv = ConvertToHSV (img);
-				IplImage imgThreshed = Cv.CreateImage (Cv.GetSize (imgHsv), imBitDepth, 1);
-				Cv.InRangeS (imgHsv, from, to, imgThreshed);
-				Cv.ReleaseImage (imgHsv);
+				CvMat imgHsv = ConvertToHSV (img);
+
+				CvMat imgThreshed = new CvMat (img.Rows, img.Cols, MonoColorMatrix);
+
+				imgHsv.InRangeS (from, to, imgThreshed);
+
 				return imgThreshed;
+
 		}
 
 		// Convert the image to HSV values
-		IplImage ConvertToHSV (IplImage img)
+		CvMat ConvertToHSV (CvMat img)
 		{
-				IplImage imgHsv = Cv.CreateImage (Cv.GetSize (img), imBitDepth, imColorChannels);
-				Cv.CvtColor (img, imgHsv, ColorConversion.BgrToHsv);
+				
+				CvMat imgHSV = img.EmptyClone ();  // Assign destination matrix of same size and type
 
-				return imgHsv;
+				Cv.CvtColor (img, imgHSV, ColorConversion.BgrToHsv);
+
+				return (imgHSV);
+
 		}
 
 		// Use the two corners of the mouse-drawn box to define the pixel box (aka ROI)
@@ -1080,7 +1060,6 @@ public class VideoCaptureScript : MonoBehaviour
 
 		public void OnDestroy ()
 		{
-				Cv.ReleaseImage (videoSourceImage);
 				Cv.DestroyAllWindows ();  // Does this Dispose too??
 
 		}
@@ -1125,7 +1104,5 @@ public class VideoCaptureScript : MonoBehaviour
 						_satHigh = _satLow;
 				}
 		}
-
-
 	
 }
