@@ -1,0 +1,17 @@
+App/
+[Ll]ibrary/
+[Tt]emp/
+[Bb]uild/
+UWP/
+
+*.csproj
+*.unityproj
+*.sln
+*.ai
+*.suo
+*.user
+*.userprefs
+*.pidb
+*.booproj
+
+sysinfo.txt
